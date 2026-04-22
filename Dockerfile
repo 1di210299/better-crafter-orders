@@ -20,6 +20,9 @@ COPY api.py .
 COPY functions/ ./functions/
 COPY templates/ ./templates/
 
+# Allow `import config` from functions/ (same as Firebase Functions runtime)
+ENV PYTHONPATH=/app/functions:/app
+
 # ─── Cloud Run injects PORT env var ──────────────────────
 ENV PORT=8080
 EXPOSE 8080
