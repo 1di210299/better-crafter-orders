@@ -3,7 +3,7 @@ import DatePicker from 'react-datepicker'
 import 'react-datepicker/dist/react-datepicker.css'
 import './App.css'
 
-const API_URL = 'http://localhost:8000/api'
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api'
 
 const SUPPLIERS = [
   { id: 'stephen', name: 'Stephen', email: '7173783020@hellofax.com' }

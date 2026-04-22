@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+venv/
+.venv/
+functions/venv/
+
+# Frontend
+frontend/
+node_modules/
+
+# Local files
+.env
+.env.local
+*.log
+logs/
+test_output/
+.DS_Store
+.vscode/
+.idea/
+
+# Git / docs
+.git/
+.gitignore
+.github/
+docs/
+README.md
+plan.md
+DESIGN.md
+
+# Scripts (dev only)
+scripts/
+tests/
+
+# Firebase
+.firebaserc
+firebase.json
+firebase-debug.log
+*.firebaserc
+
+# Client secret (local only)
+client_secret_*.json

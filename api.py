@@ -5,10 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-import sys
 import time
-import types
-import unittest.mock as _mock
 from datetime import date
 from pathlib import Path
 
@@ -20,21 +17,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger("api")
 
-# Load .env
+# Load .env locally (in Cloud Run env vars are injected)
 env_file = Path(__file__).parent / ".env"
 if env_file.exists():
     for line in env_file.read_text().splitlines():
         if "=" in line and not line.startswith("#"):
             key, _, value = line.partition("=")
             os.environ.setdefault(key.strip(), value.strip())
-
-# Mock firebase_admin for local use
-_fb_mock = types.ModuleType("firebase_admin")
-_fb_mock.storage = _mock.MagicMock()
-sys.modules.setdefault("firebase_admin", _fb_mock)
-sys.modules.setdefault("firebase_admin.storage", _fb_mock.storage)
-sys.modules.setdefault("firebase_functions", types.ModuleType("firebase_functions"))
-sys.modules.setdefault("firebase_functions.params", types.ModuleType("firebase_functions.params"))
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -46,9 +35,21 @@ from functions.word_generator import WordReportGenerator
 
 app = FastAPI(title="Order Automation System", version="1.0.0")
 
+# CORS — allow local dev + Firebase Hosting URLs
+_allowed_origins = [
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "https://orders-bf760.web.app",
+    "https://orders-bf760.firebaseapp.com",
+]
+# Allow extra origins via env var (comma-separated)
+_extra = os.environ.get("ALLOWED_ORIGINS", "")
+if _extra:
+    _allowed_origins.extend([o.strip() for o in _extra.split(",") if o.strip()])
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=_allowed_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -291,4 +292,5 @@ def health():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
