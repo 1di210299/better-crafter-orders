@@ -8,8 +8,9 @@ venv/
 .venv/
 functions/venv/
 
-# Frontend
-frontend/
+# Frontend — keep source, exclude build artifacts & deps
+frontend/node_modules/
+frontend/dist/
 node_modules/
 
 # Local files

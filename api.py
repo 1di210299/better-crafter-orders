@@ -290,6 +290,28 @@ def health():
     return {"status": "ok", "date": date.today().isoformat()}
 
 
+# ── Serve frontend static files (built by Vite in Docker stage 1) ──
+_frontend_dir = Path(__file__).parent / "frontend_dist"
+if _frontend_dir.exists():
+    from fastapi.staticfiles import StaticFiles
+    from fastapi.responses import FileResponse as _FR
+
+    # Mount Vite's /assets directory
+    app.mount("/assets", StaticFiles(directory=str(_frontend_dir / "assets")), name="assets")
+
+    @app.get("/")
+    def _serve_index():
+        return _FR(str(_frontend_dir / "index.html"))
+
+    @app.get("/{full_path:path}")
+    def _serve_spa(full_path: str):
+        # Serve actual file if exists, else fallback to index.html (SPA routing)
+        file_path = _frontend_dir / full_path
+        if file_path.is_file():
+            return _FR(str(file_path))
+        return _FR(str(_frontend_dir / "index.html"))
+
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))

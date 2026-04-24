@@ -9,7 +9,7 @@ from pathlib import Path
 from google_auth_oauthlib.flow import InstalledAppFlow
 
 GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
-CREDENTIALS_FILE = Path(__file__).parent / "client_secret_706034452884-8u5fq9rsmb33o52ltj5qp4gnv668v2gl.apps.googleusercontent.com.json"
+CREDENTIALS_FILE = Path(__file__).resolve().parent.parent / "client_secret_706034452884-8u5fq9rsmb33o52ltj5qp4gnv668v2gl.apps.googleusercontent.com.json"
 
 
 def run_oauth_flow() -> str:
