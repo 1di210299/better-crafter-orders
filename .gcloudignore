@@ -1,0 +1,16 @@
+# Based on .gitignore but explicitly includes the Word template needed for Cloud Build
+
+.gcloudignore
+.git/
+functions/venv/
+__pycache__/
+*.pyc
+.env
+*.log
+node_modules/
+frontend/node_modules/
+test_output/
+client_secret_*.json
+
+# Include templates/*.docx (needed at runtime in the container)
+# Do NOT add *.docx here
