@@ -3,7 +3,7 @@ FROM node:20-slim AS frontend-builder
 
 WORKDIR /frontend
 COPY frontend/package*.json ./
-RUN npm ci
+RUN npm install --no-audit --no-fund
 
 COPY frontend/ ./
 # Use relative URL — frontend served from same origin as API
