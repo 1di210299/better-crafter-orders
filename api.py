@@ -25,7 +25,7 @@ if env_file.exists():
             key, _, value = line.partition("=")
             os.environ.setdefault(key.strip(), value.strip())
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
@@ -385,17 +385,17 @@ def download_report(filename: str):
 
 @app.post("/api/gmail-webhook", status_code=200)
 async def gmail_webhook(request: Request):
-    """Receive Gmail push notifications from Google Pub/Sub.
-
-    When a new email arrives in the Gmail inbox, Pub/Sub calls this endpoint.
-    We fetch the new message, parse it for orders, and append to OneDrive.
-    """
+    """Receive Gmail push notifications from Google Pub/Sub."""
     import base64
     import json as _json
 
-    # Read raw bytes first — Pub/Sub may not send Content-Type: application/json
+    # Log everything about the incoming request
+    headers = dict(request.headers)
     raw = await request.body()
-    logger.info("📩 Raw webhook body (%d bytes): %s", len(raw), raw[:200])
+    logger.info("═" * 50)
+    logger.info("📩 WEBHOOK HIT — method=%s url=%s", request.method, request.url)
+    logger.info("📩 Headers: %s", {k: v for k, v in headers.items() if k.lower() in ('content-type','content-length','user-agent')})
+    logger.info("📩 Body (%d bytes): %s", len(raw), raw[:500])
 
     try:
         body = _json.loads(raw)
