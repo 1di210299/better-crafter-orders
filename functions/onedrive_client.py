@@ -19,6 +19,7 @@ Required env vars:
 import os
 import json
 import logging
+import time
 import requests
 
 logger = logging.getLogger(__name__)
@@ -92,17 +93,29 @@ def download_docx() -> bytes:
 
 
 def upload_docx(content: bytes) -> None:
-    """Upload (replace) the target .docx file on OneDrive with new content."""
+    """Upload (replace) the target .docx file on OneDrive with new content.
+    Retries up to 5 times on 423 Locked errors (file open by someone).
+    """
     drive_id = _env("ONEDRIVE_DRIVE_ID")
     file_id  = _env("ONEDRIVE_FILE_ID")
-
     url = f"{GRAPH_BASE}/drives/{drive_id}/items/{file_id}/content"
     headers = _headers()
     headers["Content-Type"] = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
-    r = requests.put(url, headers=headers, data=content, timeout=120)
-    r.raise_for_status()
-    logger.info("Uploaded updated docx to OneDrive")
+    for attempt in range(1, 6):
+        r = requests.put(url, headers=headers, data=content, timeout=120)
+        if r.status_code == 423:
+            wait = attempt * 10  # 10s, 20s, 30s, 40s, 50s
+            logger.warning("⏳ OneDrive file locked (423) — attempt %d/5, retrying in %ds...", attempt, wait)
+            time.sleep(wait)
+            headers = _headers()  # refresh token before retry
+            headers["Content-Type"] = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            continue
+        r.raise_for_status()
+        logger.info("✅ Uploaded updated docx to OneDrive (attempt %d)", attempt)
+        return
+
+    raise RuntimeError("OneDrive file is locked after 5 retries — please close the file and try again")
 
 
 def get_file_name() -> str:
