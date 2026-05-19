@@ -161,7 +161,13 @@ class WordReportGenerator:
 def append_orders_to_existing_docx(docx_bytes: bytes, orders: list[dict[str, str]]) -> tuple[bytes, int, int]:
     """
     Append order rows to the first table in an existing .docx file.
-    Skips orders that are already present (duplicate detection).
+
+    BUG 2 FIX: Deduplication is now done strictly by Gmail message ID in
+    Firestore (see ProcessedEmailStore), NOT by (date, item_code, customer_name).
+    The old key collapsed two genuinely distinct orders for the same customer
+    (e.g. Bill ordering the same item twice) into a single row. We now trust
+    the caller (main.py) to only pass through orders whose Gmail message_id
+    has not been processed before, and we append every one of them.
 
     Args:
         docx_bytes: Raw bytes of the existing Word document (downloaded from OneDrive).
@@ -170,6 +176,7 @@ def append_orders_to_existing_docx(docx_bytes: bytes, orders: list[dict[str, str
 
     Returns:
         Tuple of (updated_bytes, appended_count, skipped_count).
+        skipped_count is kept for API compatibility and is always 0.
     """
     if not orders:
         raise ValueError("At least one order is required")
@@ -183,30 +190,12 @@ def append_orders_to_existing_docx(docx_bytes: bytes, orders: list[dict[str, str
 
     table = doc.tables[0]
 
-    # Build a set of existing row signatures to detect duplicates
-    # Key: (order_date, item_code, customer_name) — enough to identify a unique order
-    existing = set()
-    for row in table.rows:
-        cells = [c.text.strip() for c in row.cells]
-        if len(cells) >= 5:
-            existing.add((cells[0], cells[1], cells[4]))  # date, item_code, customer_name
-
     # Sort ascending so oldest orders come first
     sorted_orders = WordReportGenerator._sort_orders_ascending(orders)
 
     appended = 0
-    skipped  = 0
+    skipped = 0
     for order in sorted_orders:
-        key = (
-            order.get("order_date", "").strip(),
-            order.get("item_code", "").strip(),
-            order.get("customer_name", "").strip(),
-        )
-        if key in existing:
-            logger.info(f"⏭️  Skipping duplicate: {key}")
-            skipped += 1
-            continue
-
         row_cells = table.add_row().cells
         row_cells[0].text = order.get("order_date", "")      # Date
         row_cells[1].text = order.get("item_code", "")       # Item No.
@@ -217,13 +206,17 @@ def append_orders_to_existing_docx(docx_bytes: bytes, orders: list[dict[str, str
         row_cells[6].text = order.get("ship_by", "")         # Ship by date
         if len(row_cells) > 7:
             row_cells[7].text = ""                           # Sent to customer
-        existing.add(key)
+        logger.info(
+            "📝 Appended row: date=%r item=%r qty=%r customer=%r",
+            order.get("order_date"), order.get("item_code"),
+            order.get("quantity"), order.get("customer_name"),
+        )
         appended += 1
 
     buf = io.BytesIO()
     doc.save(buf)
     buf.seek(0)
-    logger.info(f"OneDrive docx: {appended} appended, {skipped} skipped (duplicates)")
+    logger.info("OneDrive docx: %d appended, %d skipped", appended, skipped)
     return buf.read(), appended, skipped
 
 

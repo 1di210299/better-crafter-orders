@@ -34,6 +34,9 @@ class GmailMessage:
     body: str
     pdf_text: str = ""
     pdf_filenames: list[str] = field(default_factory=list)
+    # BUG 4: Gmail API internalDate (Unix ms). Used as the canonical "email sent date"
+    # for the Word file, instead of whatever date the customer wrote inside the body.
+    internal_date_ms: int = 0
 
 
 class GmailClient:
@@ -148,6 +151,11 @@ class GmailClient:
 
             first_msg_payload = thread_msgs[0]
             first_message_id  = first_msg_payload.get("id", "")
+            # BUG 4: capture the actual Gmail send timestamp of the first message.
+            try:
+                first_internal_date_ms = int(first_msg_payload.get("internalDate", 0))
+            except (TypeError, ValueError):
+                first_internal_date_ms = 0
 
             # Log headers of FIRST message
             headers = {
@@ -191,6 +199,7 @@ class GmailClient:
                     body=decoded_body,
                     pdf_text=combined_pdf_text,
                     pdf_filenames=all_pdf_filenames,
+                    internal_date_ms=first_internal_date_ms,
                 )
             )
 

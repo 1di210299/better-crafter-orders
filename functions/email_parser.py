@@ -14,20 +14,30 @@ class SupplierParser(ABC):
     """Base parser contract for supplier email body extraction."""
 
     @abstractmethod
-    def parse(self, email_body: str, pdf_text: str | None = None) -> dict[str, str] | None:
-        """Parse a supplier email body into normalized order fields."""
+    def parse(self, email_body: str, pdf_text: str | None = None) -> list[dict[str, str]] | None:
+        """Parse a supplier email body into a list of normalized order rows.
+
+        Returns a list because a single email may contain several distinct items
+        (BUG 3) — one returned dict per item, all sharing the email-level fields
+        (order_date, customer_name, ship_by, ...).
+        """
 
 
 class StephenParser(SupplierParser):
     """Parser for the real Stephen supplier email format.
 
-    Handles emails where Item: appears twice:
+    Handles emails where Item: appears twice per item:
       Item: 302Perch        <- item code
       Item: 2-hole house    <- item name
-    Also handles 'Item name:' as an alternate label for the item name.
+    And also emails with multiple items, where the same labels repeat:
+      Item: 201
+      Item: tube feeder red
+      Item: 305
+      Item: suet feeder blue
+    Returns one dict per (code, name) pair.
     """
 
-    # Single-value fields
+    # Single-value (email-level) fields
     SIMPLE_PATTERNS: dict[str, re.Pattern[str]] = {
         "order_date":    re.compile(r"^\s*order\s*date\s*:\s*(.+?)\s*$", re.I | re.M),
         "color":         re.compile(r"^\s*color\s*:\s*(.+?)\s*$", re.I | re.M),
@@ -37,71 +47,72 @@ class StephenParser(SupplierParser):
         "brand":         re.compile(r"^\s*brand\s*:\s*(.+?)\s*$", re.I | re.M),
     }
 
-    # item code: purely numeric or alphanumeric starting with digits (e.g. 302Perch, 100)
-    ITEM_CODE_RE = re.compile(r"^\s*item\s*:\s*(\d[\w]*)\s*$", re.I | re.M)
-    # item name after 'Item:' — line that starts with letters
-    ITEM_NAME_INLINE_RE = re.compile(r"^\s*item\s*:\s*([A-Za-z][^\n\r]{2,})$", re.I | re.M)
+    # All "Item: <value>" lines (we classify each value below)
+    ITEM_LINE_RE = re.compile(r"^\s*item\s*:\s*(.+?)\s*$", re.I | re.M)
     # explicit 'Item name:' label
     ITEM_NAME_LABEL_RE = re.compile(r"^\s*item\s*name\s*:\s*(.+?)\s*$", re.I | re.M)
+    # A value is considered an item-code when it starts with a digit (e.g. 201, 302Perch)
+    CODE_VALUE_RE = re.compile(r"^\d[\w-]*$")
 
     ALL_FIELDS: tuple[str, ...] = (
         "order_date", "item_code", "item_name", "color",
         "ship_by", "customer_name", "quantity", "brand",
     )
 
-    def parse(self, email_body: str, pdf_text: str | None = None) -> dict[str, str] | None:
-        """Extract all order fields from a Stephen email body."""
+    def parse(self, email_body: str, pdf_text: str | None = None) -> list[dict[str, str]] | None:
+        """Extract all order rows from a Stephen email body (one per item)."""
         if not email_body or ":" not in email_body:
             return None
 
-        parsed: dict[str, str] = {}
+        common: dict[str, str] = {}
 
-        # Simple single-value fields
+        # Simple single-value (email-level) fields
         for key, pattern in self.SIMPLE_PATTERNS.items():
             match = pattern.search(email_body)
             if match:
-                parsed[key] = self._normalize(key, match.group(1))
+                common[key] = self._normalize(key, match.group(1))
+
+        # ── BUG 3 FIX: collect ALL Item: lines, then pair codes with names ──
+        all_item_values = [v.strip() for v in self.ITEM_LINE_RE.findall(email_body) if v.strip()]
+        explicit_names  = [self._normalize("item_name", v)
+                           for v in self.ITEM_NAME_LABEL_RE.findall(email_body) if v.strip()]
+
+        codes: list[str] = []
+        inline_names: list[str] = []
+        for value in all_item_values:
+            if self.CODE_VALUE_RE.match(value):
+                codes.append(value)
             else:
-                if key == "color":
-                    logger.debug("Missing optional field 'color'")
-                else:
-                    logger.debug("Missing field '%s' in supplier email body", key)
+                inline_names.append(value)
 
-        # Item code (numeric/alphanumeric e.g. 302Perch)
-        code_match = self.ITEM_CODE_RE.search(email_body)
-        if code_match:
-            parsed["item_code"] = self._normalize("item_code", code_match.group(1))
-        else:
-            logger.debug("Missing field 'item_code' in supplier email body")
+        # Prefer explicitly-labelled names, fall back to the inline "Item: <text>"
+        names = explicit_names if explicit_names else inline_names
 
-        # Item name — prefer explicit 'Item name:' label
-        # Fall back to the SECOND 'Item:' line (the first is always the code)
-        name_match = self.ITEM_NAME_LABEL_RE.search(email_body)
-        if name_match:
-            parsed["item_name"] = self._normalize("item_name", name_match.group(1))
-        else:
-            # Collect all 'Item:' values; skip the one already captured as item_code
-            item_code = parsed.get("item_code", "")
-            all_item_lines = re.findall(
-                r"^\s*item\s*:\s*(.+?)\s*$", email_body, re.I | re.M
-            )
-            name_candidates = [
-                v.strip() for v in all_item_lines
-                if v.strip() and v.strip() != item_code
-            ]
-            if name_candidates:
-                parsed["item_name"] = self._normalize("item_name", name_candidates[0])
-            else:
-                logger.debug("Missing field 'item_name' in supplier email body")
+        # Build one order per item. Pair codes and names positionally; pad with "".
+        items_count = max(len(codes), len(names), 1 if (codes or names) else 0)
+        if items_count == 0:
+            # No item info at all — emit a single empty-item row so the email-level
+            # required-fields check below can decide whether to keep it.
+            items_count = 1
 
-        # Require at minimum order_date and customer_name to be a valid order
-        if not parsed.get("order_date") and not parsed.get("customer_name"):
+        orders: list[dict[str, str]] = []
+        for i in range(items_count):
+            order = dict(common)  # shared email-level fields
+            order["item_code"] = codes[i] if i < len(codes) else ""
+            order["item_name"] = names[i] if i < len(names) else ""
+            for key in self.ALL_FIELDS:
+                order.setdefault(key, "")
+            orders.append(order)
+
+        # Require at minimum order_date OR customer_name on the email to be a valid order
+        if not common.get("order_date") and not common.get("customer_name"):
             return None
 
-        for key in self.ALL_FIELDS:
-            parsed.setdefault(key, "")
-
-        return parsed
+        logger.info(
+            "StephenParser: parsed %d item row(s) (codes=%s, names=%s)",
+            len(orders), codes, names,
+        )
+        return orders
 
     @staticmethod
     def _normalize(field: str, value: str) -> str:
@@ -151,14 +162,17 @@ class SmartParser(SupplierParser):
             logger.warning("Failed to initialize Gemini parser: %s — using regex fallback", exc)
             return False
 
-    def parse(self, email_body: str, pdf_text: str | None = None) -> dict[str, str] | None:
-        """Try Gemini first, fall back to regex parser."""
+    def parse(self, email_body: str, pdf_text: str | None = None) -> list[dict[str, str]] | None:
+        """Try Gemini first, fall back to regex parser. Always returns a list."""
         # Try Gemini
         if self._ensure_gemini():
             try:
                 result = self._gemini.parse(email_body, pdf_text=pdf_text)
                 if result:
-                    logger.debug("Gemini parser succeeded")
+                    # Gemini may return either a single dict or a list of dicts.
+                    if isinstance(result, dict):
+                        result = [result]
+                    logger.debug("Gemini parser succeeded (%d row(s))", len(result))
                     return result
                 logger.debug("Gemini returned None — falling back to regex")
             except Exception as exc:

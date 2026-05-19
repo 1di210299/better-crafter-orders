@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -40,14 +40,21 @@ def _is_valid_order(order: dict) -> bool:
 
 
 @scheduler_fn.on_schedule(
-    schedule="every 12 hours",
+    # BUG 5: Run once daily at 02:00 America/New_York (ET, handles DST automatically).
+    schedule="0 2 * * *",
+    timezone=scheduler_fn.Timezone("America/New_York"),
     region="us-central1",
     memory=options.MemoryOption.MB_512,
-    timeout_sec=300,
+    # BUG 5: bumped timeout so long Gmail/Gemini runs don't get killed silently.
+    timeout_sec=540,
 )
 def process_stephen_orders(event: scheduler_fn.ScheduledEvent) -> None:
     """Process outgoing emails to Stephen, generate a Word report, and upload it."""
     del event
+
+    # ── BUG 5: health-check log so we always know the job triggered ─────────
+    run_started_utc = datetime.now(timezone.utc).isoformat()
+    logger.info("🚀 Job started at %s (UTC)", run_started_utc)
 
     client_id = GMAIL_CLIENT_ID
     client_secret = GMAIL_CLIENT_SECRET
@@ -56,19 +63,33 @@ def process_stephen_orders(event: scheduler_fn.ScheduledEvent) -> None:
     # Set GEMINI_API_KEY env so get_parser() picks it up
     os.environ["GEMINI_API_KEY"] = GEMINI_API_KEY
 
-    gmail_client = GmailClient(
-        gmail_account=config.GMAIL_ACCOUNT,
-        client_id=client_id,
-        client_secret=client_secret,
-        refresh_token=refresh_token,
-    )
+    try:
+        gmail_client = GmailClient(
+            gmail_account=config.GMAIL_ACCOUNT,
+            client_id=client_id,
+            client_secret=client_secret,
+            refresh_token=refresh_token,
+        )
+    except Exception as error:
+        # BUG 5: surface OAuth/refresh-token failures loudly instead of silent exit.
+        logger.error("❌ Gmail client init failed (OAuth refresh token?): %s", error, exc_info=error)
+        raise
+
     store = ProcessedEmailStore(config.FIRESTORE_COLLECTION)
     parser = get_parser("stephen")
 
+    # BUG 1 / BUG 5: use the real signature (start_date / end_date) instead of the
+    # non-existent `hours_back` kwarg that was raising TypeError on every run and
+    # silently killing the whole job (so Erick's email — and many others — were
+    # never processed at all).
+    lookback_days = max(1, int(config.SEARCH_HOURS_BACK / 24) or 1)
+    start_date = (datetime.utcnow() - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
     messages = gmail_client.list_supplier_messages(
         supplier_email=config.STEPHEN_EMAIL,
-        hours_back=config.SEARCH_HOURS_BACK,
+        start_date=start_date,
     )
+
+    logger.info("📬 Gmail returned %d candidate messages (since %s)", len(messages), start_date)
 
     if not messages:
         logger.info("No supplier emails found; exiting gracefully")
@@ -78,19 +99,52 @@ def process_stephen_orders(event: scheduler_fn.ScheduledEvent) -> None:
     message_to_order: list[tuple[str, dict[str, str]]] = []
 
     for message in messages:
+        # BUG 1: per-message trace so dropped orders (Erick etc.) are visible in logs.
+        body_preview = (message.body or "").replace("\n", " ⏎ ")[:160]
+        logger.info(
+            "🔍 msg=%s thread=%s pdfs=%d body_preview=%r",
+            message.message_id, message.thread_id,
+            len(message.pdf_filenames), body_preview,
+        )
         try:
             if store.is_processed(message.message_id):
-                logger.info("Skipping already processed message: %s", message.message_id)
+                logger.info("⏭️  Skipping already processed message: %s", message.message_id)
                 continue
 
             parsed = parser.parse(message.body, pdf_text=message.pdf_text or None)
-            if parsed is None or not _is_valid_order(parsed):
-                logger.warning("Skipped message %s (no valid order)", message.message_id)
+            if not parsed:
+                logger.warning("❌ Parser returned nothing for msg=%s", message.message_id)
                 continue
 
-            order = _sanitize_order(parsed)
-            parsed_orders.append(order)
-            message_to_order.append((message.message_id, order))
+            # BUG 3: parser now returns list[dict] — one entry per item in the email.
+            for sub in parsed:
+                if not _is_valid_order(sub):
+                    logger.warning(
+                        "❌ Skipped sub-order from msg=%s (missing item_code/customer_name): %s",
+                        message.message_id, sub,
+                    )
+                    continue
+
+                order = _sanitize_order(sub)
+
+                # BUG 4: override the body's "order date" with the actual Gmail send date.
+                if message.internal_date_ms:
+                    try:
+                        sent_dt = datetime.fromtimestamp(
+                            message.internal_date_ms / 1000, tz=timezone.utc
+                        )
+                        order["order_date"] = sent_dt.strftime("%m/%d")
+                    except Exception as exc:
+                        logger.warning("Could not format internalDate for %s: %s",
+                                       message.message_id, exc)
+
+                logger.info(
+                    "✅ Parsed order msg=%s customer=%r item_code=%r date=%r",
+                    message.message_id,
+                    order.get("customer_name"), order.get("item_code"), order.get("order_date"),
+                )
+                parsed_orders.append(order)
+                message_to_order.append((message.message_id, order))
         except Exception as error:
             logger.error("Failed to process message %s", message.message_id, exc_info=error)
             continue
